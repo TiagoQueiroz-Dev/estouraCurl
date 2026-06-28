@@ -1,0 +1,18 @@
+{
+  "name": "estoura-google-copa",
+  "version": "1.0.0",
+  "description": "Abre o navegador, busca jogos da Copa no Google e intercepta o JSON do widget de esportes (match_fullpage) para extrair placar, escalacoes, estatisticas e transmissao.",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "api": "node server.js",
+    "test": "node test.js && node test-eventos.js",
+    "postinstall": "playwright install chromium"
+  },
+  "dependencies": {
+    "express": "^4.22.2",
+    "playwright": "^1.49.0",
+    "swagger-ui-express": "^5.0.1"
+  }
+}
