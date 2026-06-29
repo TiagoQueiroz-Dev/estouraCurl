@@ -191,6 +191,8 @@ function extractEscalacoes(mf) {
     const jogadores = [];
     // f[4] e uma arvore com os jogadores; cada jogador tem um sub-array cujo
     // [0] e a info ["Nome",...] e ha um numero da camisa em string.
+    // Os jogadores aparecem em ORDEM de formacao (goleiro primeiro, depois
+    // cada linha defesa->ataque), o que nos permite derivar "linha" e "ordem".
     walk(f[4], (node) => {
       if (
         Array.isArray(node) &&
@@ -205,8 +207,30 @@ function extractEscalacoes(mf) {
         }
       }
     });
+    atribuirLinhaEOrdem(jogadores, f[1]);
     return { time: f[0], formacao: f[1], jogadores };
   });
+}
+
+/**
+ * Atribui "linha" e "ordem" a cada jogador (mutando o array) a partir da
+ * string de formacao. A linha 1 e sempre o goleiro; as demais linhas seguem
+ * os digitos da formacao (ex.: "4-2-3-1" => linha 2 com 4, linha 3 com 2, etc.).
+ * "ordem" e a posicao (1-based) do jogador dentro da sua linha.
+ * Os dados do Google ja vem em ordem de formacao, entao basta fatiar.
+ */
+function atribuirLinhaEOrdem(jogadores, formacao) {
+  if (typeof formacao !== "string") return;
+  const digitos = formacao.split("-").map(Number).filter((n) => n > 0);
+  const tamanhos = [1, ...digitos]; // linha 1 = goleiro
+  let i = 0;
+  for (let linha = 0; linha < tamanhos.length; linha++) {
+    for (let ordem = 1; ordem <= tamanhos[linha] && i < jogadores.length; ordem++) {
+      jogadores[i].linha = linha + 1;
+      jogadores[i].ordem = ordem;
+      i++;
+    }
+  }
 }
 
 // ---- Funcao principal ----
