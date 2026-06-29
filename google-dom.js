@@ -1,0 +1,374 @@
+// =====================================================
+// google-dom.js
+// Fallback para partidas em que o Google renderiza os dados no DOM da
+// visao imersiva, mas nao emite mais a resposta match_fullpage.
+// =====================================================
+
+async function extrairJogoDoDom(page, htmlEscalacao = "") {
+  try {
+    try {
+      let clicouDesempenho = false;
+      const opcoes = page.getByText("Desempenho", { exact: true });
+      for (let i = 0, total = await opcoes.count(); i < total; i++) {
+        const opcao = opcoes.nth(i);
+        if (await opcao.isVisible({ timeout: 100 }).catch(() => false)) {
+          await opcao.click({ timeout: 1000 });
+          clicouDesempenho = true;
+          break;
+        }
+      }
+
+      if (!clicouDesempenho) clicouDesempenho = await page.evaluate(() => {
+        const clean = (s) => String(s || "").replace(/\u00a0/g, " ").trim();
+        const visivel = (el) => {
+          const st = getComputedStyle(el);
+          const box = el.getBoundingClientRect();
+          return st.display !== "none" && st.visibility !== "hidden" && box.width > 0 && box.height > 0;
+        };
+        const root = [...document.querySelectorAll('[data-app-state^="m;"], [data-async-type="lr_mt_fp"]')]
+          .find((el) => visivel(el) && /ESCALAÇÕES/i.test(clean(el.innerText || el.textContent)));
+        if (!root) return false;
+        const alvo = [...root.querySelectorAll("*")].find((el) => clean(el.textContent) === "Desempenho" && visivel(el));
+        if (!alvo) return false;
+        alvo.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
+        return true;
+      });
+      if (clicouDesempenho) {
+        await page.waitForTimeout(300);
+      }
+    } catch {
+      /* subaba ausente; segue com o DOM atual */
+    }
+
+    return await page.evaluate(async (htmlEscalacaoCapturado) => {
+      const clean = (s) =>
+        String(s || "")
+          .replace(/\u00a0/g, " ")
+          .replace(/[ \t]+/g, " ")
+          .trim();
+
+      const text = (el) => clean(el?.innerText || el?.textContent || "");
+      const linhas = (s) =>
+        clean(s)
+          .split(/\n+/)
+          .map(clean)
+          .filter(Boolean);
+      const normalizarUrl = (url) => {
+        const valor = clean(url);
+        if (!valor) return null;
+        if (valor.startsWith("//")) return "https:" + valor;
+        if (/^https?:\/\//i.test(valor) || /^data:image\//i.test(valor)) return valor;
+        return null;
+      };
+      const urlsDeSrcset = (srcset) =>
+        clean(srcset)
+          .split(",")
+          .map((item) => item.trim().split(/\s+/)[0])
+          .filter(Boolean);
+      const escolherImagem = (urls) => {
+        const candidatas = urls.map(normalizarUrl).filter(Boolean);
+        return candidatas.find((url) => /^https?:\/\//i.test(url)) || candidatas.find((url) => /^data:image\//i.test(url)) || null;
+      };
+      const imagemDoElemento = (el) => {
+        const urls = [];
+        for (const img of el?.querySelectorAll?.("img") || []) {
+          urls.push(img.getAttribute("data-src"), img.currentSrc, img.getAttribute("src"));
+          urls.push(...urlsDeSrcset(img.getAttribute("srcset")));
+        }
+        return escolherImagem(urls);
+      };
+
+      const visivel = (el) => {
+        const st = getComputedStyle(el);
+        const box = el.getBoundingClientRect();
+        return st.display !== "none" && st.visibility !== "hidden" && box.width > 0 && box.height > 0;
+      };
+
+      const roots = [...document.querySelectorAll('[data-app-state^="m;"], [data-async-type="lr_mt_fp"]')]
+        .map((el) => {
+          const t = text(el);
+          const all = clean(`${t}\n${el.textContent || ""}`);
+          const players = el.querySelectorAll('span[role="text"][aria-label*="nº"]').length;
+          const formations = linhas(all).filter((l) => /^\d(?:-\d){1,4}$/.test(l)).length;
+          return { el, t, all, players, formations, visible: visivel(el) };
+        })
+        .filter((r) => {
+          const conteudo = r.t || r.all;
+          return conteudo && /\b(MINUTO A MINUTO|Minuto a minuto|ESCALAÇÕES|ESTATÍSTICAS)\b/.test(conteudo);
+        });
+
+      roots.sort(
+        (a, b) =>
+          Number(b.visible) - Number(a.visible) ||
+          b.players - a.players ||
+          b.formations - a.formations ||
+          b.t.length - a.t.length
+      );
+      const root = roots[0]?.el;
+      if (!root) return null;
+
+      const raw = text(root);
+      const allRaw = `${roots.map((r) => r.all).join("\n")}\n${document.documentElement.textContent || ""}`;
+      const lines = linhas(raw);
+      const allLines = linhas(allRaw);
+      if (!lines.length) return null;
+
+      const titulo = lines.find((l) => /\s[x×]\s/i.test(l)) || null;
+      const partesTitulo = titulo ? titulo.split(/\s[x×]\s/i).map(clean) : [];
+
+      let placarCasa = null;
+      let placarFora = null;
+      for (let i = 0; i < lines.length - 2; i++) {
+        if (/^\d+$/.test(lines[i]) && /^[x×]$/i.test(lines[i + 1]) && /^\d+$/.test(lines[i + 2])) {
+          placarCasa = lines[i];
+          placarFora = lines[i + 2];
+          break;
+        }
+      }
+
+      const statusLine = lines.find((l) => /^(Ao vivo|Encerrad[oa]|Intervalo|Adiado|Agendado|Final|FIM)$/i.test(l));
+      const status = /^FIM$/i.test(statusLine || "") ? "Encerrado" : statusLine || null;
+      const minuto = lines.find((l) => /^\d{1,3}(?:\+\d+)?'$/.test(l)) || null;
+
+      const compLine = lines.find((l) => /(Copa|FIFA|Campeonato|Liga|Mundial)/i.test(l)) || null;
+      const competicao = compLine ? clean(compLine.split(" · ")[0]) : null;
+      const fase =
+        lines.find(
+          (l) =>
+            l !== compLine &&
+            /(Fase|Grupo|Rodada|rodada|Final|Oitavas|Quartas|Semi|Disputa)/i.test(l)
+        ) || null;
+
+      const localMatch = raw.match(/Local:\s*([^\n]+?)(?:\n(?:Fotos:|De acordo)|\n|$)/i);
+      const localTexto = localMatch ? clean(localMatch[1]) : null;
+      const [estadio, ...cidadePartes] = localTexto ? localTexto.split(",").map(clean) : [];
+
+      const estatisticas = [];
+      const statNames = new Set();
+      for (const row of root.querySelectorAll("tr")) {
+        const cells = [...row.children].map(text);
+        if (cells.length < 3) continue;
+        const [casa, nome, fora] = cells;
+        if (!nome || /ESTATÍSTICAS/i.test(nome) || statNames.has(nome)) continue;
+        if (!/[A-Za-zÀ-ÿ]/.test(nome)) continue;
+        if (!/^\d+(?:[,.]\d+)?%?$/.test(casa) || !/^\d+(?:[,.]\d+)?%?$/.test(fora)) continue;
+        estatisticas.push({ nome, casa, fora });
+        statNames.add(nome);
+      }
+
+      const parseJogador = (aria) => {
+        const m = clean(aria).match(/n[ºo]\s*(\d+),\s*([^,]+)(?:,\s*(?:classificação|rating)\s*([\d.,]+))?/i);
+        if (!m) return null;
+        return { numero: m[1], nome: clean(m[2]), nota: m[3] ? m[3].replace(",", ".") : null };
+      };
+
+      const posicaoDaLinha = (linha, totalLinhas) =>
+        linha === 1
+          ? "Goleiro"
+          : linha === 2
+            ? "Zagueiro"
+            : linha === totalLinhas
+              ? "Atacante"
+              : "Meio-campo";
+
+      const formacaoValida = (f) =>
+        /^\d(?:-\d){1,4}$/.test(f) &&
+        f.split("-").map(Number).reduce((total, n) => total + n, 0) === 10;
+
+      const numero = (s) => Number(String(s || "").match(/[\d.]+/)?.[0] || 0);
+      const extrairLayoutDeHtml = (html) => {
+        if (!html) return null;
+        const doc = new DOMParser().parseFromString(html, "text/html");
+        const formacoesAsync = [...doc.querySelectorAll('[aria-label^="Esquema"]')]
+          .map((el) => clean(el.textContent) || clean(el.getAttribute("aria-label")).replace(/^Esquema\s+/i, ""))
+          .filter(formacaoValida);
+        if (formacoesAsync.length < 2) return null;
+
+        const rows = [...doc.querySelectorAll(".lrvl-fr")]
+          .map((row) => ({
+            alturaPct: numero(row.getAttribute("style")),
+            slots: [...row.querySelectorAll(".lrvl-pd")]
+              .map((slot) => {
+                const jogador = parseJogador(slot.querySelector('span[role="text"]')?.getAttribute("aria-label"));
+                if (!jogador) return null;
+                jogador.imagem = imagemDoElemento(slot);
+                jogador.larguraPct = numero(slot.getAttribute("style"));
+                return jogador;
+              })
+              .filter(Boolean),
+          }))
+          .filter((row) => row.slots.length);
+
+        const linhasPorFormacao = (formacao) => 1 + formacao.split("-").length;
+        const linhasCasa = linhasPorFormacao(formacoesAsync[0]);
+        const linhasFora = linhasPorFormacao(formacoesAsync[1]);
+        if (rows.length < linhasCasa + linhasFora) return null;
+
+        const montarJogadores = (rowList) =>
+          rowList.flatMap((row, rowIdx) => {
+            const linha = rowIdx + 1;
+            const totalLinhas = rowList.length;
+            return row.slots.map((jogador, slotIdx) => ({
+              ...jogador,
+              linha,
+              ordem: slotIdx + 1,
+              totalNaLinha: row.slots.length,
+              alturaLinhaPct: row.alturaPct || null,
+              posicao: posicaoDaLinha(linha, totalLinhas),
+            }));
+          });
+
+        const rowsCasa = rows.slice(0, linhasCasa);
+        const rowsFora = rows.slice(linhasCasa, linhasCasa + linhasFora).reverse();
+        return {
+          formacoes: formacoesAsync,
+          homePlayers: montarJogadores(rowsCasa),
+          awayPlayers: montarJogadores(rowsFora),
+        };
+      };
+
+      const extrairLayoutAsync = async () => {
+        const capturado = extrairLayoutDeHtml(htmlEscalacaoCapturado);
+        if (capturado) return capturado;
+
+        const urls = performance
+          .getEntriesByType("resource")
+          .map((entry) => entry.name)
+          .filter((url) => url.includes("/async/lr_mt_fp"));
+
+        for (const url of urls.reverse()) {
+          try {
+            const html = await fetch(url, { credentials: "include" }).then((r) => r.text());
+            const extraido = extrairLayoutDeHtml(html);
+            if (extraido) return extraido;
+          } catch {
+            /* tenta a proxima resposta async */
+          }
+        }
+        return null;
+      };
+
+      const layoutAsync = await extrairLayoutAsync();
+      const formacoesTexto = [...new Set(allRaw.match(/\d(?:-\d){1,4}/g) || [])].filter(formacaoValida);
+      const formacoes = layoutAsync?.formacoes || formacoesTexto;
+      const titulares = [];
+      const vistos = new Set();
+      for (const span of root.querySelectorAll('span[role="text"][aria-label*="nº"]')) {
+        const aria = clean(span.getAttribute("aria-label"));
+        const jogador = parseJogador(aria);
+        if (!jogador) continue;
+        jogador.imagem = imagemDoElemento(span.closest(".lrvl-pd") || span.parentElement);
+        for (let el = span; el; el = el.parentElement) {
+          const box = el.getBoundingClientRect();
+          if (box.width > 0 && box.height > 0) {
+            jogador._x = box.x;
+            jogador._y = box.y;
+            break;
+          }
+        }
+        const chave = `${jogador.numero}|${jogador.nome}`;
+        if (vistos.has(chave)) {
+          const idx = titulares.findIndex((j) => `${j.numero}|${j.nome}` === chave);
+          if (idx >= 0 && titulares[idx]._y == null && jogador._y != null) titulares[idx] = jogador;
+          continue;
+        }
+        vistos.add(chave);
+        titulares.push(jogador);
+      }
+
+      const agruparPorCampo = (jogadores, invertido = false) => {
+        const todosTemPosicao = jogadores.length && jogadores.every((j) => Number.isFinite(j._y));
+        if (!todosTemPosicao) return { jogadores: invertido ? [...jogadores].reverse() : jogadores, formacao: null };
+
+        const ordenados = [...jogadores].sort((a, b) => (invertido ? b._y - a._y : a._y - b._y));
+        const grupos = [];
+        for (const jogador of ordenados) {
+          const grupo = grupos[grupos.length - 1];
+          if (!grupo || Math.abs(grupo.y - jogador._y) > 45) {
+            grupos.push({ y: jogador._y, jogadores: [jogador] });
+          } else {
+            grupo.jogadores.push(jogador);
+            grupo.y = grupo.jogadores.reduce((s, j) => s + j._y, 0) / grupo.jogadores.length;
+          }
+        }
+
+        for (const grupo of grupos) grupo.jogadores.sort((a, b) => a._x - b._x);
+        const counts = grupos.map((g) => g.jogadores.length);
+        if (counts[0] !== 1 || counts.length <= 2) {
+          return { jogadores: invertido ? [...jogadores].reverse() : jogadores, formacao: null };
+        }
+        const formacao = counts.slice(1).join("-");
+        return { jogadores: grupos.flatMap((g) => g.jogadores), formacao };
+      };
+
+      const atribuirLinhaEOrdem = (jogadores, formacao) => {
+        const tamanhos = [1, ...String(formacao || "").split("-").map(Number).filter((n) => n > 0)];
+        let idx = 0;
+        for (let linha = 0; linha < tamanhos.length; linha++) {
+          for (let ordem = 1; ordem <= tamanhos[linha] && idx < jogadores.length; ordem++) {
+            const j = jogadores[idx++];
+            j.linha = linha + 1;
+            j.ordem = ordem;
+            j.totalNaLinha = tamanhos[linha];
+            j.larguraPct = 100 / tamanhos[linha];
+            j.alturaLinhaPct = 100 / tamanhos.length;
+            j.posicao =
+              posicaoDaLinha(linha + 1, tamanhos.length);
+          }
+        }
+      };
+
+      const campoCasa = agruparPorCampo(titulares.slice(0, 11));
+      const campoFora = agruparPorCampo(titulares.slice(11, 22), true);
+      const formacaoCasa = formacoes[0] || campoCasa.formacao;
+      const formacaoFora = formacoes[1] || campoFora.formacao;
+      const homePlayers = layoutAsync?.homePlayers || campoCasa.jogadores;
+      const awayPlayers = layoutAsync?.awayPlayers || campoFora.jogadores;
+      if (!layoutAsync) {
+        atribuirLinhaEOrdem(homePlayers, formacaoCasa);
+        atribuirLinhaEOrdem(awayPlayers, formacaoFora);
+      }
+      for (const jogador of [...homePlayers, ...awayPlayers]) {
+        delete jogador._x;
+        delete jogador._y;
+      }
+
+      const escalacoes = [];
+      if (homePlayers.length) escalacoes.push({ time: partesTitulo[0] || null, formacao: formacaoCasa || null, jogadores: homePlayers });
+      if (awayPlayers.length) escalacoes.push({ time: partesTitulo[1] || null, formacao: formacaoFora || null, jogadores: awayPlayers });
+
+      const mandante = partesTitulo[0]
+        ? { nome: partesTitulo[0], sigla: null, placar: placarCasa, cor: null, logo: null }
+        : null;
+      const visitante = partesTitulo[1]
+        ? { nome: partesTitulo[1], sigla: null, placar: placarFora, cor: null, logo: null }
+        : null;
+
+      if (!titulo || (!estatisticas.length && !escalacoes.length && placarCasa == null)) return null;
+
+      return {
+        titulo,
+        competicao,
+        fase,
+        status,
+        minuto,
+        data: null,
+        local: localTexto ? { estadio: estadio || null, cidade: cidadePartes.join(", ") || null } : null,
+        mandante,
+        visitante,
+        placar:
+          mandante && visitante
+            ? `${mandante.nome} ${mandante.placar ?? "?"} x ${visitante.placar ?? "?"} ${visitante.nome}`
+            : null,
+        probabilidade: null,
+        estatisticas,
+        transmissao: [],
+        escalacoes,
+      };
+    }, htmlEscalacao || "");
+  } catch {
+    return null;
+  }
+}
+
+export { extrairJogoDoDom };

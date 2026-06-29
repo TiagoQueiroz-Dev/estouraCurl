@@ -20,6 +20,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { writeFileSync, mkdirSync } from "node:fs";
 import { parseMatch, extractMatchFullpage } from "./parser.js";
+import { extrairJogoDoDom } from "./google-dom.js";
 import { diffEventos } from "./eventos.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -68,12 +69,16 @@ async function main() {
   // com um numero de sequencia. O consumidor compara a sequencia para saber
   // se chegou algo novo (assim nenhuma atualizacao do polling e perdida).
   let ultima = null;
+  let ultimaEscalacaoHtml = null;
   let seq = 0;
   page.on("response", async (response) => {
     try {
       const url = response.url();
       if (!/google\.[a-z.]+\//.test(url)) return;
       const text = await response.text();
+      if (/\/async\/lr_mt_fp/.test(url) && text.includes("lrvl-fr")) {
+        ultimaEscalacaoHtml = text;
+      }
       const obj = extractMatchFullpage(text);
       if (obj) ultima = { obj, url, seq: ++seq };
     } catch {
@@ -108,17 +113,36 @@ async function main() {
   let captura = await aguardar(0, passoMs);
 
   // 2) Se nao veio, abre a visao imersiva (fullpage) que dispara o async.
-  //    Tenta a aba de resumo (ms) e a de escalacoes (dt) — o match_fullpage
-  //    capturado em qualquer uma ja traz placar + estatisticas + escalacoes.
+  //    Tenta resumo (ms), estatisticas (dt) e escalacoes (ln). Em jogos
+  //    encerrados o Google pode renderizar os dados so no DOM.
   let fragImersivo = ""; // ultimo fragmento usado (para recarregar no watch)
   if (!captura) {
     const gid = await extrairGid(page);
     if (gid) {
-      for (const aba of ["ms", "dt"]) {
+      for (const aba of ["ms", "dt", "ln"]) {
         if (captura) break;
-        log(`🖼   Abrindo visao imersiva (${aba === "dt" ? "escalacoes" : "resumo"}) — ${gid}...`);
-        fragImersivo = `#sie=m;${gid};2;${competicao};${aba};fp;1;;;;-1`;
+        const nomeAba = aba === "ln" ? "escalacoes" : aba === "dt" ? "estatisticas" : "resumo";
+        log(`🖼   Abrindo visao imersiva (${nomeAba}) — ${gid}...`);
+        fragImersivo = `#sie=m;${gid};2;${competicao};${aba};fp;1;;;;-1${aba === "ln" ? "&slt=2" : ""}`;
+        const esperarEscalacao =
+          aba === "ln"
+            ? page
+                .waitForResponse((r) => {
+                  const url = r.url();
+                  return /\/async\/lr_mt_fp/.test(url) && /(tab:ln|tab%3Aln|\|ln\||%7Cln%7C)/.test(url);
+                }, { timeout: passoMs + 6000 })
+                .catch(() => null)
+            : null;
         await buscar(query, fragImersivo);
+        const respEscalacao = esperarEscalacao ? await esperarEscalacao : null;
+        if (respEscalacao) {
+          try {
+            const text = await respEscalacao.text();
+            if (text.includes("lrvl-fr")) ultimaEscalacaoHtml = text;
+          } catch {
+            /* segue com o DOM */
+          }
+        }
         captura = await aguardar(0, passoMs + 6000);
       }
     }
@@ -127,10 +151,14 @@ async function main() {
   // Snapshot inicial (estado completo) + baseline para o diff de eventos.
   let jogoAnt = null;
   let ultSeq = 0;
+  const jogoDom = captura ? null : await extrairJogoDoDom(page, ultimaEscalacaoHtml);
   if (captura) {
     jogoAnt = parseMatch(captura.obj);
     ultSeq = captura.seq;
     emitir({ jogo: jogoAnt, url: captura.url });
+  } else if (jogoDom) {
+    jogoAnt = jogoDom;
+    emitir({ jogo: jogoAnt, url: page.url() });
   } else {
     erroSemCaptura();
     if (!watchSeconds) {
@@ -147,6 +175,11 @@ async function main() {
   if (watchSeconds) {
     log(`\n🔁  Acompanhando ao vivo — eventos serao logados conforme acontecem. Ctrl+C para sair.\n`);
     const fimRegex = /^(Encerrad|Final|Após|Finalizad)/i;
+    if (jogoAnt && fimRegex.test(jogoAnt.status || "")) {
+      log(`\n🏁  Partida encerrada (${jogoAnt.status}).`);
+      await context.close();
+      return;
+    }
     // eslint-disable-next-line no-constant-condition
     while (true) {
       const novo = await aguardar(ultSeq, Math.max(watchSeconds, 30) * 1000 + 15000);
@@ -172,6 +205,21 @@ async function main() {
         // Nada novo no intervalo: recarrega para reativar o polling.
         if (fragImersivo) await buscar(query, fragImersivo).catch(() => {});
         else await page.reload({ waitUntil: "domcontentloaded" }).catch(() => {});
+
+        const jogoDomAtual = await extrairJogoDoDom(page, ultimaEscalacaoHtml);
+        if (jogoDomAtual) {
+          salvar(jogoDomAtual);
+          if (!jogoAnt) emitir({ jogo: jogoDomAtual, url: page.url() });
+          else {
+            const eventos = diffEventos(jogoAnt, jogoDomAtual);
+            if (eventos.length) logarEventos(jogoDomAtual, eventos);
+          }
+          jogoAnt = jogoDomAtual;
+          if (fimRegex.test(jogoDomAtual.status || "")) {
+            log(`\n🏁  Partida encerrada (${jogoDomAtual.status}).`);
+            break;
+          }
+        }
       }
     }
   }
@@ -282,7 +330,7 @@ function emitir({ jogo, url }) {
       console.log(`        ${t.nome} (${t.preco ?? ""}) -> ${t.url ?? ""}`);
   }
   for (const esc of jogo.escalacoes) {
-    console.log(`   👥  ${esc.time} (${esc.formacao}) — ${esc.jogadores.length} jogadores`);
+    console.log(`   👥  ${esc.time} (${esc.formacao || "?"}) — ${esc.jogadores.length} jogadores`);
     for (const j of esc.jogadores)
       console.log(`        ${String("#" + j.numero).padStart(4)}  ${j.nome.padEnd(22)} ${j.posicao ?? ""}`);
   }

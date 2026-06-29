@@ -18,6 +18,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { writeFileSync, mkdirSync } from "node:fs";
 import { parseMatch, extractMatchFullpage } from "./parser.js";
+import { extrairJogoDoDom } from "./google-dom.js";
 import { diffEventos } from "./eventos.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -84,7 +85,7 @@ function snapshot(tag, jogo, arq) {
       `${jogo.minuto ? " " + jogo.minuto : ""}]`
   );
   for (const esc of jogo.escalacoes || [])
-    logJ(tag, `escalacao ${esc.time} (${esc.formacao}) — ${esc.jogadores.length} jogadores`);
+    logJ(tag, `escalacao ${esc.time} (${esc.formacao || "?"}) — ${esc.jogadores.length} jogadores`);
   if (arq) logJ(tag, `💾 salvo em ${arq}`);
 }
 
@@ -103,12 +104,16 @@ async function monitorarJogo(query) {
   const page = context.pages()[0] || (await context.newPage());
 
   let ultima = null;
+  let ultimaEscalacaoHtml = null;
   let seq = 0;
   page.on("response", async (r) => {
     try {
       const url = r.url();
       if (!/google\.[a-z.]+\//.test(url)) return;
       const text = await r.text();
+      if (/\/async\/lr_mt_fp/.test(url) && text.includes("lrvl-fr")) {
+        ultimaEscalacaoHtml = text;
+      }
       const obj = extractMatchFullpage(text);
       if (obj) ultima = { obj, url, seq: ++seq };
     } catch {
@@ -170,11 +175,30 @@ async function monitorarJogo(query) {
   if (!captura) {
     const gid = await extrairGid();
     if (gid) {
-      for (const aba of ["ms", "dt"]) {
+      for (const aba of ["ms", "dt", "ln"]) {
         if (captura) break;
-        logJ(tag, `abrindo visao imersiva (${aba === "dt" ? "escalacoes" : "resumo"}) — ${gid}`);
-        fragImersivo = `#sie=m;${gid};2;${competicao};${aba};fp;1;;;;-1`;
+        const nomeAba = aba === "ln" ? "escalacoes" : aba === "dt" ? "estatisticas" : "resumo";
+        logJ(tag, `abrindo visao imersiva (${nomeAba}) — ${gid}`);
+        fragImersivo = `#sie=m;${gid};2;${competicao};${aba};fp;1;;;;-1${aba === "ln" ? "&slt=2" : ""}`;
+        const esperarEscalacao =
+          aba === "ln"
+            ? page
+                .waitForResponse((r) => {
+                  const url = r.url();
+                  return /\/async\/lr_mt_fp/.test(url) && /(tab:ln|tab%3Aln|\|ln\||%7Cln%7C)/.test(url);
+                }, { timeout: passoMs + 6000 })
+                .catch(() => null)
+            : null;
         await buscar(query, fragImersivo);
+        const respEscalacao = esperarEscalacao ? await esperarEscalacao : null;
+        if (respEscalacao) {
+          try {
+            const text = await respEscalacao.text();
+            if (text.includes("lrvl-fr")) ultimaEscalacaoHtml = text;
+          } catch {
+            /* segue com o DOM */
+          }
+        }
         captura = await aguardar(0, passoMs + 6000);
       }
     }
@@ -189,6 +213,21 @@ async function monitorarJogo(query) {
     ultSeq = captura.seq;
     snapshot(tag, jogoAnt, salvar(jogoAnt));
   } else {
+    const jogoDom = await extrairJogoDoDom(page, ultimaEscalacaoHtml);
+    if (jogoDom) {
+      jogoAnt = jogoDom;
+      snapshot(tag, jogoAnt, salvar(jogoAnt));
+    }
+  }
+
+  if (jogoAnt && fim.test(jogoAnt.status || "")) {
+    logJ(tag, `🏁 partida encerrada (${jogoAnt.status}).`);
+    await context.close();
+    logJ(tag, "worker encerrado.");
+    return;
+  }
+
+  if (!jogoAnt) {
     logJ(tag, "aguardando o widget aparecer (jogo pode nao ter comecado)...");
   }
 
@@ -216,6 +255,23 @@ async function monitorarJogo(query) {
       // Nada novo: recarrega para reativar o polling.
       if (fragImersivo) await buscar(query, fragImersivo).catch(() => {});
       else await page.reload({ waitUntil: "domcontentloaded" }).catch(() => {});
+
+      const jogoDom = await extrairJogoDoDom(page, ultimaEscalacaoHtml);
+      if (jogoDom) {
+        const arq = salvar(jogoDom);
+        if (!jogoAnt) {
+          snapshot(tag, jogoDom, arq);
+        } else {
+          const eventos = diffEventos(jogoAnt, jogoDom);
+          const pre = jogoDom.minuto ? `${jogoDom.minuto}  ` : "";
+          for (const e of eventos) logJ(tag, pre + e);
+        }
+        jogoAnt = jogoDom;
+        if (fim.test(jogoDom.status || "")) {
+          logJ(tag, `🏁 partida encerrada (${jogoDom.status}).`);
+          break;
+        }
+      }
     }
   }
 
