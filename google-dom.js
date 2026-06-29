@@ -116,19 +116,31 @@ async function extrairJogoDoDom(page, htmlEscalacao = "") {
       const titulo = lines.find((l) => /\s[x×]\s/i.test(l)) || null;
       const partesTitulo = titulo ? titulo.split(/\s[x×]\s/i).map(clean) : [];
 
-      let placarCasa = null;
-      let placarFora = null;
-      for (let i = 0; i < lines.length - 2; i++) {
-        if (/^\d+$/.test(lines[i]) && /^[x×]$/i.test(lines[i + 1]) && /^\d+$/.test(lines[i + 2])) {
-          placarCasa = lines[i];
-          placarFora = lines[i + 2];
-          break;
+      // Placar, status e minuto vivem no CABECALHO do card da partida, que
+      // costuma ficar FORA do `root` (o root e o painel da aba de escalacoes/
+      // estatisticas). Por isso buscamos primeiro no painel (lines) e, se nao
+      // achar, no documento inteiro (allLines). O placar pode vir como uma
+      // unica linha ("2 x 1" / "2 - 1") ou em tres linhas separadas.
+      const acharPlacar = (ls) => {
+        for (const l of ls) {
+          const m = l.match(/^(\d+)\s*[x×–-]\s*(\d+)$/i);
+          if (m) return [m[1], m[2]];
         }
-      }
+        for (let i = 0; i < ls.length - 2; i++) {
+          if (/^\d+$/.test(ls[i]) && /^[x×–-]$/i.test(ls[i + 1]) && /^\d+$/.test(ls[i + 2])) {
+            return [ls[i], ls[i + 2]];
+          }
+        }
+        return [null, null];
+      };
+      let [placarCasa, placarFora] = acharPlacar(lines);
+      if (placarCasa == null) [placarCasa, placarFora] = acharPlacar(allLines);
 
-      const statusLine = lines.find((l) => /^(Ao vivo|Encerrad[oa]|Intervalo|Adiado|Agendado|Final|FIM)$/i.test(l));
+      const reStatus = /^(Ao vivo|Encerrad[oa]|Intervalo|Adiado|Agendado|Final|FIM)$/i;
+      const statusLine = lines.find((l) => reStatus.test(l)) || allLines.find((l) => reStatus.test(l));
       const status = /^FIM$/i.test(statusLine || "") ? "Encerrado" : statusLine || null;
-      const minuto = lines.find((l) => /^\d{1,3}(?:\+\d+)?'$/.test(l)) || null;
+      const reMinuto = /^\d{1,3}(?:\+\d+)?'$/;
+      const minuto = lines.find((l) => reMinuto.test(l)) || allLines.find((l) => reMinuto.test(l)) || null;
 
       const compLine = lines.find((l) => /(Copa|FIFA|Campeonato|Liga|Mundial)/i.test(l)) || null;
       const competicao = compLine ? clean(compLine.split(" · ")[0]) : null;
