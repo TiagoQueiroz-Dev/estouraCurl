@@ -117,7 +117,13 @@ app.use((req, res, next) => {
 // Autenticacao: exige o header X-Api-Token em TODAS as rotas, exceto a
 // documentacao (Swagger UI e a spec), para a doc poder carregar no browser.
 app.use((req, res, next) => {
-  if (req.path === "/openapi.json" || req.path === "/docs" || req.path.startsWith("/docs/"))
+  if (
+    req.path === "/openapi.json" ||
+    req.path === "/docs" ||
+    req.path.startsWith("/docs/") ||
+    req.path === "/swagger" ||
+    req.path.startsWith("/swagger/")
+  )
     return next();
   if (req.get("X-Api-Token") === API_TOKEN) return next();
   res.status(401).json({ erro: "Nao autorizado: header X-Api-Token ausente ou invalido" });
@@ -125,6 +131,7 @@ app.use((req, res, next) => {
 
 // Documentacao Swagger
 app.use("/docs", swaggerUi.serve, swaggerUi.setup(openapi));
+app.use("/swagger", swaggerUi.serve, swaggerUi.setup(openapi));
 app.get("/openapi.json", (_req, res) => res.json(openapi));
 
 app.get("/health", (_req, res) => {
@@ -221,6 +228,7 @@ app.get("/jogos/:slug/escalacoes", async (req, res) => {
 const server = app.listen(PORT, () => {
   console.log(`🌐  API no ar em http://localhost:${PORT}`);
   console.log(`📚  Swagger:    http://localhost:${PORT}/docs`);
+  console.log(`📚  Swagger:    http://localhost:${PORT}/swagger`);
   console.log(`📁  Lendo dados de: ${DADOS_DIR}`);
   console.log(`🔑  X-Api-Token: ${API_TOKEN}`);
   console.log(`⚙️   Max workers simultaneos: ${MAX_JOBS}` +
