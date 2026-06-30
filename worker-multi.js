@@ -16,10 +16,11 @@
 import { chromium } from "playwright";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { writeFileSync, mkdirSync } from "node:fs";
+import { writeFileSync, readFileSync, mkdirSync } from "node:fs";
 import { parseMatch, extractMatchFullpage } from "./parser.js";
 import { extrairJogoDoDom } from "./google-dom.js";
 import { diffEventos } from "./eventos.js";
+import { mesclar } from "./merge.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -65,11 +66,16 @@ function salvar(jogo) {
       : join(outArg, slug(jogo.titulo) + ".json")
     : join(__dirname, "dados", slug(jogo.titulo) + ".json");
   mkdirSync(dirname(caminho), { recursive: true });
-  writeFileSync(
-    caminho,
-    JSON.stringify({ coletadoEm: new Date().toISOString(), ...jogo }, null, 2),
-    "utf8"
-  );
+  // Mescla com a coleta anterior preservando o ultimo valor bom de cada campo,
+  // para que um poll degradado (sem match_fullpage) nao zere placar/status/etc.
+  const novo = { coletadoEm: new Date().toISOString(), ...jogo };
+  let conteudo = novo;
+  try {
+    conteudo = mesclar(JSON.parse(readFileSync(caminho, "utf8")), novo);
+  } catch {
+    /* 1a coleta (sem arquivo) ou arquivo ilegivel: grava o novo cru */
+  }
+  writeFileSync(caminho, JSON.stringify(conteudo, null, 2), "utf8");
   return caminho;
 }
 
