@@ -140,10 +140,27 @@ async function monitorarJogo(query) {
     return null;
   };
 
+  // Id da ENTIDADE DA PARTIDA, robusto p/ qualquer jogo: data-emid (preciso) ->
+  // /g/ dentro do widget da partida (lr_mt_fp, isola do id de time/liga) ->
+  // fallback 1o /g/ da pagina (comportamento antigo).
   const extrairGid = async () => {
     try {
       return await page.evaluate(() => {
-        const ids = document.documentElement.outerHTML.match(/\/g\/[0-9a-z_]{6,}/g) || [];
+        const reGid = /\/g\/[0-9a-z_]{6,}/;
+        const reGidG = /\/g\/[0-9a-z_]{6,}/g;
+
+        for (const el of document.querySelectorAll("[data-emid]")) {
+          const m = (el.getAttribute("data-emid") || "").match(reGid);
+          if (m) return m[0];
+        }
+
+        const mt = document.querySelector('[data-async-type="lr_mt_fp"]');
+        for (let el = mt, i = 0; el && i < 8; el = el.parentElement, i++) {
+          const ids = el.outerHTML.match(reGidG);
+          if (ids && ids[0]) return ids[0];
+        }
+
+        const ids = document.documentElement.outerHTML.match(reGidG) || [];
         return ids[0] || null;
       });
     } catch {

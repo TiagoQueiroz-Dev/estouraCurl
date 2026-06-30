@@ -77,6 +77,15 @@ async function extrairJogoDoDom(page, htmlEscalacao = "") {
         }
         return escolherImagem(urls);
       };
+      // Resolve a URL de UMA tag <img> (o helper acima varre filhos; uma img
+      // nao tem <img> dentro de si, entao precisamos ler os atributos dela).
+      const urlDaImg = (img) =>
+        escolherImagem([
+          img.getAttribute("data-src"),
+          img.currentSrc,
+          img.getAttribute("src"),
+          ...urlsDeSrcset(img.getAttribute("srcset")),
+        ]);
 
       const visivel = (el) => {
         const st = getComputedStyle(el);
@@ -154,6 +163,55 @@ async function extrairJogoDoDom(page, htmlEscalacao = "") {
       const localMatch = raw.match(/Local:\s*([^\n]+?)(?:\n(?:Fotos:|De acordo)|\n|$)/i);
       const localTexto = localMatch ? clean(localMatch[1]) : null;
       const [estadio, ...cidadePartes] = localTexto ? localTexto.split(",").map(clean) : [];
+
+      // --- Logo dos times ----------------------------------------------------
+      // IMPORTANTE: no DOM da visao imersiva o Google NAO renderiza nem o
+      // codigo de 3 letras (sigla) nem a cor do time — esses campos so existem
+      // no JSON match_fullpage. Por isso aqui extraimos APENAS o escudo (que
+      // esta no DOM como <img> de /sports/logos/); sigla/cor ficam null no
+      // fallback (preenchidos quando o match_fullpage e capturado).
+      const ehLogoEsporte = (url) => /\/sports\/logos\//i.test(url || "");
+      const logosEsporte = [];
+      const urlsLogoVistas = new Set();
+      for (const img of document.querySelectorAll("img")) {
+        const url = urlDaImg(img);
+        if (!url || !ehLogoEsporte(url) || urlsLogoVistas.has(url)) continue;
+        urlsLogoVistas.add(url);
+        logosEsporte.push({
+          url,
+          img,
+          alt: clean(img.getAttribute("alt") || img.getAttribute("aria-label")),
+        });
+      }
+
+      // Escolhe o escudo do time pelo ALT (mais confiavel). O fallback usa a
+      // ordem do documento — o Google sempre renderiza o mandante primeiro.
+      const logoPorNome = (nome) =>
+        nome
+          ? logosEsporte.find(
+              (l) => l.alt && l.alt.toLowerCase().includes(nome.toLowerCase())
+            ) || null
+          : null;
+      let entradaCasa = logoPorNome(partesTitulo[0]);
+      let entradaFora = logoPorNome(partesTitulo[1]);
+      if (!entradaCasa) entradaCasa = logosEsporte[0] || null;
+      if (!entradaFora) entradaFora = logosEsporte.find((l) => l !== entradaCasa) || null;
+
+      // --- Data/horario agendado --------------------------------------------
+      // Para partida ainda nao iniciada nao ha placar/minuto, mas ha o horario.
+      // Prioriza o ISO de <time datetime>; cai para a hora visivel (HH:MM).
+      let dataIso = null;
+      for (const t of document.querySelectorAll("time[datetime]")) {
+        const v = clean(t.getAttribute("datetime"));
+        if (/^\d{4}-\d{2}-\d{2}/.test(v)) {
+          dataIso = v;
+          break;
+        }
+      }
+      const horaTexto =
+        lines.find((l) => /^\d{1,2}:\d{2}$/.test(l)) ||
+        allLines.find((l) => /^\d{1,2}:\d{2}$/.test(l)) ||
+        null;
 
       const estatisticas = [];
       const statNames = new Set();
@@ -349,22 +407,74 @@ async function extrairJogoDoDom(page, htmlEscalacao = "") {
       if (homePlayers.length) escalacoes.push({ time: partesTitulo[0] || null, formacao: formacaoCasa || null, jogadores: homePlayers });
       if (awayPlayers.length) escalacoes.push({ time: partesTitulo[1] || null, formacao: formacaoFora || null, jogadores: awayPlayers });
 
+      // --- Probabilidade de vitoria (quando o Google exibe o bloco) ---------
+      // Generico: ancora no texto "Probabilidade de vitoria" e le as 3
+      // porcentagens na ordem visual tipica (mandante | empate | visitante).
+      const extrairProbabilidade = () => {
+        const idx = allLines.findIndex((l) => /Probabilidade de vit[oó]ria/i.test(l));
+        if (idx < 0) return null;
+        const pcts = [];
+        for (const l of allLines.slice(idx, idx + 14)) {
+          const m = l.match(/^(\d{1,3})%$/);
+          if (m) pcts.push(m[1]);
+          if (pcts.length >= 3) break;
+        }
+        if (pcts.length < 3) return null;
+        return {
+          casa: { time: partesTitulo[0] || null, chance: pcts[0] },
+          empate: { time: "Empate", chance: pcts[1] },
+          visitante: { time: partesTitulo[1] || null, chance: pcts[2] },
+        };
+      };
+
+      // Transmissao: no DOM as opcoes de streaming nao sao ancoras limpas
+      // (o "Assista ao vivo" e um botao de video, e os demais links da pagina
+      // sao resultados de busca/redes sociais — ruido). Esse dado so vem
+      // confiavel pelo match_fullpage, entao no fallback fica vazio.
+      const probabilidade = extrairProbabilidade();
+      const transmissao = [];
+
+      // sigla/cor: ausentes no DOM (so existem no match_fullpage) -> null.
       const mandante = partesTitulo[0]
-        ? { nome: partesTitulo[0], sigla: null, placar: placarCasa, cor: null, logo: null }
+        ? {
+            nome: partesTitulo[0],
+            sigla: null,
+            placar: placarCasa,
+            cor: null,
+            logo: entradaCasa?.url || null,
+          }
         : null;
       const visitante = partesTitulo[1]
-        ? { nome: partesTitulo[1], sigla: null, placar: placarFora, cor: null, logo: null }
+        ? {
+            nome: partesTitulo[1],
+            sigla: null,
+            placar: placarFora,
+            cor: null,
+            logo: entradaFora?.url || null,
+          }
         : null;
 
-      if (!titulo || (!estatisticas.length && !escalacoes.length && placarCasa == null)) return null;
+      // Jogo sem placar, sem status ao vivo, mas com horario => "Agendado".
+      const statusFinal =
+        status || (placarCasa == null && (dataIso || horaTexto) ? "Agendado" : null);
+
+      // So descarta se nao houver NADA aproveitavel (nem times, nem dados).
+      const temConteudo =
+        estatisticas.length ||
+        escalacoes.length ||
+        placarCasa != null ||
+        dataIso ||
+        mandante?.logo ||
+        visitante?.logo;
+      if (!titulo || !temConteudo) return null;
 
       return {
         titulo,
         competicao,
         fase,
-        status,
+        status: statusFinal,
         minuto,
-        data: null,
+        data: dataIso,
         local: localTexto ? { estadio: estadio || null, cidade: cidadePartes.join(", ") || null } : null,
         mandante,
         visitante,
@@ -372,9 +482,9 @@ async function extrairJogoDoDom(page, htmlEscalacao = "") {
           mandante && visitante
             ? `${mandante.nome} ${mandante.placar ?? "?"} x ${visitante.placar ?? "?"} ${visitante.nome}`
             : null,
-        probabilidade: null,
+        probabilidade,
         estatisticas,
-        transmissao: [],
+        transmissao,
         escalacoes,
       };
     }, htmlEscalacao || "");

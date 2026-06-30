@@ -148,6 +148,41 @@ function extractLocal(mf) {
   };
 }
 
+// Termos de fase reconhecidos — cobre fase de grupos E todo o mata-mata
+// (generico para qualquer partida, nao so a fase de grupos).
+const FASE_RX =
+  /(\bFase de grupos\b|\bGrupo\s+[A-Z0-9]\b|\bOitavas\b|\bQuartas\b|\bSemifinais?\b|\bFinal\b|\bDisputa\b[^"]*\bterceiro\b|\bRepescagem\b|\b(?:Primeira|Segunda|Terceira|Quarta)\s+rodada\b|\bRodada\s+\d+\b|\bPlayoffs?\b|\bMata-mata\b)/i;
+
+/**
+ * Fase da competicao. O Google traz um bloco descritor como
+ * ["Copa do Mundo","Grupo K",null,"Fase de grupos · Grupo K", ...] (grupos)
+ * ou ["Copa do Mundo","Segunda rodada",null,"Segunda rodada", ...] (mata-mata).
+ * Localizamos esse bloco pela competicao + um termo de fase e devolvemos a
+ * string mais completa (prefere a que tem "·").
+ */
+function extractFase(mf) {
+  const bloco = findFirst(
+    mf,
+    (n) =>
+      Array.isArray(n) &&
+      typeof n[0] === "string" &&
+      /Copa do Mundo|Mundial|Campeonato|Liga|Copa/i.test(n[0]) &&
+      n.some((x) => typeof x === "string" && FASE_RX.test(x))
+  );
+  if (bloco) {
+    const comPonto = bloco.find((x) => typeof x === "string" && x.includes("·") && FASE_RX.test(x));
+    if (comPonto) return comPonto;
+    const simples = bloco.find((x) => typeof x === "string" && FASE_RX.test(x));
+    if (simples) return simples;
+  }
+  // Fallback: qualquer string de fase na arvore (preferindo a com "·").
+  return (
+    findString(mf, new RegExp(`[^"]*·[^"]*${FASE_RX.source}[^"]*`, "i")) ||
+    findString(mf, FASE_RX) ||
+    null
+  );
+}
+
 /** Probabilidade de vitoria ao vivo. */
 function extractProbabilidade(mf) {
   const p = findFirst(
@@ -262,10 +297,7 @@ function parseMatch(raw) {
     findString(mf, /^Copa do Mundo$/) ||
     null;
 
-  const fase =
-    findString(mf, /Fase de grupos\s*·\s*Grupo/) ||
-    findString(mf, /Fase de grupos/) ||
-    null;
+  const fase = extractFase(mf);
 
   return {
     titulo,

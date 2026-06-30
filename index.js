@@ -227,13 +227,33 @@ async function main() {
   await context.close();
 }
 
-/** Extrai o id da entidade da partida (/g/...) do HTML da pagina. */
+/**
+ * Extrai o id da ENTIDADE DA PARTIDA (/g/...) do HTML da busca, de forma
+ * robusta para qualquer jogo. Em ordem de confiabilidade:
+ *   1) data-emid: id da entidade da partida (especifico, mais preciso);
+ *   2) o /g/ DENTRO do widget da partida (data-async-type="lr_mt_fp"), o que
+ *      isola o id da partida dos ids de TIME (lr_tm_fp) e LIGA (lr_lg_fp);
+ *   3) fallback: 1o /g/ da pagina (comportamento antigo).
+ */
 async function extrairGid(page) {
   try {
     return await page.evaluate(() => {
-      const html = document.documentElement.outerHTML;
-      const ids = html.match(/\/g\/[0-9a-z_]{6,}/g) || [];
-      return ids.length ? ids[0] : null;
+      const reGid = /\/g\/[0-9a-z_]{6,}/;
+      const reGidG = /\/g\/[0-9a-z_]{6,}/g;
+
+      for (const el of document.querySelectorAll("[data-emid]")) {
+        const m = (el.getAttribute("data-emid") || "").match(reGid);
+        if (m) return m[0];
+      }
+
+      const mt = document.querySelector('[data-async-type="lr_mt_fp"]');
+      for (let el = mt, i = 0; el && i < 8; el = el.parentElement, i++) {
+        const ids = el.outerHTML.match(reGidG);
+        if (ids && ids[0]) return ids[0];
+      }
+
+      const ids = document.documentElement.outerHTML.match(reGidG) || [];
+      return ids[0] || null;
     });
   } catch {
     return null;
