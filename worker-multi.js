@@ -189,43 +189,51 @@ async function monitorarJogo(query) {
     }
   };
 
-  logJ(tag, `iniciando — perfil ${perfil}`);
-  await buscar(query);
-  await aceitarConsentimento();
-  let captura = await aguardar(0, passoMs);
-
   let fragImersivo = "";
-  if (!captura) {
+
+  const tentarVisaoImersiva = async (desde) => {
     const gid = await extrairGid();
-    if (gid) {
-      for (const aba of ["ms", "dt", "ln"]) {
-        if (captura) break;
-        const nomeAba = aba === "ln" ? "escalacoes" : aba === "dt" ? "estatisticas" : "resumo";
-        logJ(tag, `abrindo visao imersiva (${nomeAba}) — ${gid}`);
-        fragImersivo = `#sie=m;${gid};2;${competicao};${aba};fp;1;;;;-1${aba === "ln" ? "&slt=2" : ""}`;
-        const esperarEscalacao =
-          aba === "ln"
-            ? page
-                .waitForResponse((r) => {
-                  const url = r.url();
-                  return /\/async\/lr_mt_fp/.test(url) && /(tab:ln|tab%3Aln|\|ln\||%7Cln%7C)/.test(url);
-                }, { timeout: passoMs + 6000 })
-                .catch(() => null)
-            : null;
-        await buscar(query, fragImersivo);
-        const respEscalacao = esperarEscalacao ? await esperarEscalacao : null;
-        if (respEscalacao) {
-          try {
-            const text = await respEscalacao.text();
-            if (text.includes("lrvl-fr")) ultimaEscalacaoHtml = text;
-          } catch {
-            /* segue com o DOM */
-          }
+    if (!gid) return null;
+    for (const aba of ["ms", "dt", "ln"]) {
+      if (ultima && ultima.seq > desde) return ultima;
+      const nomeAba = aba === "ln" ? "escalacoes" : aba === "dt" ? "estatisticas" : "resumo";
+      logJ(tag, `abrindo visao imersiva (${nomeAba}) — ${gid}`);
+      fragImersivo = `#sie=m;${gid};2;${competicao};${aba};fp;1;;;;-1${aba === "ln" ? "&slt=2" : ""}`;
+      const esperarEscalacao =
+        aba === "ln"
+          ? page
+              .waitForResponse((r) => {
+                const url = r.url();
+                return /\/async\/lr_mt_fp/.test(url) && /(tab:ln|tab%3Aln|\|ln\||%7Cln%7C)/.test(url);
+              }, { timeout: passoMs + 6000 })
+              .catch(() => null)
+          : null;
+      await buscar(query, fragImersivo);
+      const respEscalacao = esperarEscalacao ? await esperarEscalacao : null;
+      if (respEscalacao) {
+        try {
+          const text = await respEscalacao.text();
+          if (text.includes("lrvl-fr")) ultimaEscalacaoHtml = text;
+        } catch {
+          /* segue com o DOM */
         }
-        captura = await aguardar(0, passoMs + 6000);
       }
+      const captura = await aguardar(desde, passoMs + 6000);
+      if (captura) return captura;
     }
-  }
+    return null;
+  };
+
+  const redescobrirMatchFullpage = async (desde) => {
+    await buscar(query);
+    await aceitarConsentimento();
+    const direta = await aguardar(desde, passoMs);
+    if (direta) return direta;
+    return tentarVisaoImersiva(desde);
+  };
+
+  logJ(tag, `iniciando — perfil ${perfil}`);
+  let captura = await redescobrirMatchFullpage(0);
 
   let jogoAnt = null;
   let ultSeq = 0;
@@ -257,7 +265,10 @@ async function monitorarJogo(query) {
   // Loop: loga so os eventos que mudam; salva o JSON a cada coleta; para no fim.
   // eslint-disable-next-line no-constant-condition
   while (true) {
-    const novo = await aguardar(ultSeq, Math.max(watchSeconds, 30) * 1000 + 15000);
+    const esperaMs = ultSeq
+      ? Math.max(watchSeconds, 30) * 1000 + 15000
+      : Math.max(watchSeconds, 60) * 1000;
+    const novo = await aguardar(ultSeq, esperaMs);
     if (novo) {
       ultSeq = novo.seq;
       const jogo = parseMatch(novo.obj);
@@ -275,9 +286,35 @@ async function monitorarJogo(query) {
         break;
       }
     } else {
-      // Nada novo: recarrega para reativar o polling.
-      if (fragImersivo) await buscar(query, fragImersivo).catch(() => {});
-      else await page.reload({ waitUntil: "domcontentloaded" }).catch(() => {});
+      let capturaRedescoberta = null;
+      if (!ultSeq) {
+        logJ(tag, "sem match_fullpage; tentando redescobrir widget ao vivo...");
+        capturaRedescoberta = await redescobrirMatchFullpage(ultSeq).catch(() => null);
+      } else {
+        // Nada novo: recarrega para reativar o polling.
+        if (fragImersivo) await buscar(query, fragImersivo).catch(() => {});
+        else await page.reload({ waitUntil: "domcontentloaded" }).catch(() => {});
+        capturaRedescoberta = await aguardar(ultSeq, passoMs);
+      }
+
+      if (capturaRedescoberta) {
+        ultSeq = capturaRedescoberta.seq;
+        const jogo = parseMatch(capturaRedescoberta.obj);
+        const arq = salvar(jogo);
+        if (!jogoAnt) {
+          snapshot(tag, jogo, arq);
+        } else {
+          const eventos = diffEventos(jogoAnt, jogo);
+          const pre = jogo.minuto ? `${jogo.minuto}  ` : "";
+          for (const e of eventos) logJ(tag, pre + e);
+        }
+        jogoAnt = jogo;
+        if (fim.test(jogo.status || "")) {
+          logJ(tag, `🏁 partida encerrada (${jogo.status}).`);
+          break;
+        }
+        continue;
+      }
 
       const jogoDom = await extrairJogoDoDom(page, ultimaEscalacaoHtml);
       if (jogoDom) {
